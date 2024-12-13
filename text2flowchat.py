@@ -1,16 +1,14 @@
 import os
 openai_api_key = os.getenv("OPENAI_API_KEY")
 
-# 永久禁止显示所有警告  
-import warnings  
-
-# 仅屏蔽 LangChain 的弃用警告  
-warnings.filterwarnings("ignore", category=UserWarning, message=".*LangChainDeprecationWarning.*")
-
 from langchain_openai import ChatOpenAI
 from langchain.chains import LLMChain
 from langchain.prompts import PromptTemplate
 from langchain.chains.sequential import SequentialChain
+from langchain.embeddings import HuggingFaceEmbeddings
+from langchain.vectorstores import Chroma
+
+model_name = "sentence-transformers/sentence-t5-large"
 
 import sys  
 sys.stdout.reconfigure(encoding='utf-8')  
@@ -23,8 +21,6 @@ llm = ChatOpenAI(
     max_retries=2,
     api_key = openai_api_key,
     base_url= "https://api.chatanywhere.tech/v1"
-    # organization="...",
-    # other params...
 )
 
 class Experimental:
@@ -32,45 +28,66 @@ class Experimental:
     def __init__(self,llm):
         self.llm = llm
         self.experimental_steps_chain()
+        self.embedding = HuggingFaceEmbeddings(model_name=model_name)
 
     def __repr__(self):
         return f"Experimental({self.experimental})"
     
-    def __call__(self,experimental):
+    def __call__(self,query):
         # 综合判断进行串联  
         self.combine_chain()
-        return self.sequential_chain.run(experimental)
+        # 根据query获取experimental
+        vectorstore = Chroma(persist_directory="chroma_data1", embedding_function=self.embedding, collection_name="huggingface_embed")
+        resultn = vectorstore.similarity_search(query ,k = 2)
+        experimental = "\n".join([x.page_content for x in resultn])
+        return self.sequential_chain.run(query_str=query,experimental=experimental)
         
     # 定义可能的链
     def experimental_steps_chain(self):
-        # 定义一个上下文链（已有的初高中相关实验）/存数据库/存向量数据库 ，输出直接添加到experimental
-        # contex_template = "已知实验相关信息： {experimental}。请给出这个实验所需的步骤。"  
-        # contex_prompt = PromptTemplate(input_variables=["experimental"], template=experimental_template)      
-        # self.experimental_chain = LLMChain(llm=llm, prompt=experimental_prompt, output_key="experimental_steps",verbose=True) 
 
-        # 1. 定义第一个链：给出实验的步骤
-        experimental_template = "已知实验相关信息： {experimental}。请给出这个实验所需的步骤。实验结束，每个步骤包含一个实验器材及其对应操作，如将高锰酸钾药品平铺在试管底部，管口放一小团棉花，分成两个步骤：1.高锰酸钾药品平铺在试管底部；2.管口放一小团棉花，需要注意：实验结束并不包含实验物体不应该输出为步骤"  
-        experimental_prompt = PromptTemplate(input_variables=["experimental"], template=experimental_template)      
+        # 1. 定义第一个链：总结实验步骤，，并将每个步骤分解为具体的元操作
+        experimental_template = """
+            上下文信息如下：
+            ----------
+            {experimental}
+            ----------
+            请你基于上下文信息而不是自己的知
+            识，回答以下问题，可以分点作答，如
+            果上下文信息没有相关知识，可以回答
+            不确定，不要复述上下文信息：
+            {query_str},总结实验步骤，并将每个步骤分解为具体的元操作。
+            回答：
+        """
+        experimental_prompt = PromptTemplate(input_variables=["experimental","query_str"], template=experimental_template)      
         self.experimental_chain = LLMChain(llm=llm, prompt=experimental_prompt, output_key="experimental_steps")  
 
-        # 定义第二个链：基于上述实验步骤提取每个步骤中的物体和操作 
-        steps_template = "根据实验步骤：{experimental_steps}，输出，步骤，（实验器材，操作，实验器材），如火柴1点燃酒精灯输出为（火柴1，点燃，酒精灯）"  
+        # 定义第二个链：提取上下文信息中元操作的实验器材和操作 
+        steps_template = """
+            上下文信息如下：
+            ----------
+            {experimental_steps}
+            ----------
+            请你基于上下文信息而不是自己的知
+            识，回答以下问题，可以分点作答，如
+            果上下文信息没有相关知识，可以回答
+            不确定，不要复述上下文信息：
+            提取上下文信息中元操作的实验器材和操作,
+            一个步骤只包含一个元操作,输出格式为:
+            步骤1，（实验器材，操作，实验器材）；
+            步骤2，（实验器材，操作，实验器材）；
+            ...
+            回答：
+        """ 
         steps_prompt = PromptTemplate(input_variables=["experimental_steps"], template=steps_template)  
         self.steps_chain = LLMChain(llm=llm, prompt=steps_prompt, output_key="steps")  
 
-        # 判断选取特殊物体容量，如容器
-
-        # 判断结果准确率是否达到预期
-        # check_template = "比较实验步骤：{experimental_steps}，比较输出（步骤，实验器材，操作，被操作实验器材）：{steps}，判断是否达到80%的准确率，回答yes/no"  
-        # check_prompt = PromptTemplate(input_variables=["experimental_steps"], template=check_template)  
-        # self.check_chain = LLMChain(llm=llm, prompt=check_prompt, output_key="check")  
 
     def combine_chain(self):
         chains = [self.experimental_chain,self.steps_chain]
          # 串联链  
         self.sequential_chain = SequentialChain(  
             chains=chains,  
-            input_variables=["experimental"],  # 起始输入  
+            input_variables=["experimental","query_str"],  # 起始输入  
             output_variables=["steps"]  # 最终输出  
         )  
 
